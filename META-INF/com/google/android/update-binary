@@ -1,52 +1,48 @@
-#!/sbin/sh
+#!/system/bin/sh
 #
+# Script to provide r/w access to read-only vendor_dlkm
+# (f2fs), resize partition and replace LKM.
+#
+# ####################################################
+# Credits:
+# ####################################################
 # A simple Samsung services disabler by Ian Macdonald.
 #
 # Use this to prime your device after installing TWRP.
+# ####################################################
+# ak3-core.sh
+# osm0sis @ xda-developers
+# ####################################################
+# afaneh92 @ xda-developers
 
-DEBUG=true
+OUTFD=/proc/self/fd/$2;
+ZIPFILE="$3";
 
-ZIPFILE=$3
-ZIPNAME=${ZIPFILE##*/}
-OUTFD=$2
+# set up working directory variables
+[ "$ADLKMHOME" ] || ADLKMHOME=/tmp/anydlkm;
+[ "$ANDROID_ROOT" ] || ANDROID_ROOT=/system;
+$ADLKMTMP=$ADLKMHOME/tmp
 
-scr_wdth=50
-
-# Detect real $OUTFD
-#
-if readlink /proc/$$/fd/$OUTFD 2>/dev/null | grep /tmp >/dev/null; then
-  OUTFD=0
-  for FD in $( ls /proc/$$/fd ); do
-    if readlink /proc/$$/fd/$FD 2>/dev/null | grep pipe >/dev/null; then
-      if ps | grep " 3 $FD " | grep -v grep >/dev/null; then
-	OUTFD=$FD
-	break
-      fi
-    fi
-  done
-fi
-
+### output/testing functions:
+# ui_print "<text>" [...]
 ui_print() {
-  echo -ne "ui_print $1\n" >> /proc/self/fd/$OUTFD
-  echo -ne "ui_print\n" >> /proc/self/fd/$OUTFD
+  until [ ! "$1" ]; do
+    echo "ui_print $1
+      ui_print" >> /proc/self/fd/$OUTFD;
+    shift;
+  done;
 }
 
-debug_print() {
-  [ "$DEBUG" = true ] && ui_print "$*"
+# abort ["<text>" [...]]
+abort() {
+  ui_print " " "$@";
+  cleanup
+  exit 1;
 }
 
-print_full_bar() {
-  ui_print "$(printf '%*s\n' $scr_wdth | tr ' ' '=')"
-}
-
-print_justified() {
-  local str="$1"
-  local str_len=${#str}
-  local padding_len=$(( ($scr_wdth - $str_len - 2) / 2))
-  local ljust="$(printf '%*s' $padding_len)"
-  local rjust="$(printf '%*s' $(($padding_len + $str_len % 2)))"
-
-  ui_print "=$ljust$str$rjust="
+cleanup() {
+  cd $(dirname $ADLKMHOME);
+  rm -rf $ADLKMHOME;
 }
 
 md5() {
@@ -59,221 +55,79 @@ file_changed() {
   local new_md5=$( md5 "$file" )
 
   if [ $new_md5 != $old_md5 ]; then
-    debug_print " -     ...modified."
+    ui_print " -     ...modified."
   else
-    debug_print " -     ...unchanged."
+    ui_print " -     ...unchanged."
   fi
 }
 
-rm_from_manifest() {
-  local service=$1
-  local md5
-  local i
+resize_vendor_dlkm() {
+  local dm_block_ext4=$(df -t ext4 | grep "/vendor_dlkm" | cut -DF1)
+  local dm_block_f2fs=$(df -t f2fs | grep "/vendor_dlkm" | cut -DF1)
 
-  # Package path is different on Android 10. Check and adapt.
-  #
-  [ $major -gt 9 ] && local path_extra='\.hardware'
-
-  for i in /vendor/etc/vintf/manifest.xml \
-	   $ANDROID_ROOT/system/etc/vintf/compatibility_matrix.device.xml \
-	   /vendor/etc/vintf/manifest/vaultkeeper_manifest.xml; do
-    if [ -f $i ]; then
-      ui_print " -   Found $i."
-      md5=$( md5 $i )
-      sed -i -e '/<hal format="hidl">/{N;/<name>vendor\.samsung'"$path_extra"'\.security\.'"$service"'<\/name>/{:loop;N;/<\/hal>/!bloop;d}}' $i
-      file_changed $i $md5
-    fi
-  done
-}
-
-disable_fbe() {
-  local md5
-  local i
-
-  ui_print " - Disabling file-based encryption (FBE) for /data..."
-
-  # S20/N20 range = fstab.exynos990.
-  # S10 range = fstab.exynos9820.
-  # Note 10 range = fstab.exynos9825.
-  # A[124]0 range = fstab.exynos7885.
-  # A50 = fstab.exynos9610.
-  # Tab A 10.1 range = fstab.exynos7885.
-  # Snapdragon devices = fstab.qcom.
-  #
-  for i in /vendor/etc/fstab.exynos* \
-	   /vendor/etc/fstab.qcom*; do
-    if [ -f $i ]; then
-      ui_print " -   Found $i."
-      md5=$( md5 $i )
-      # This comments out the offending line and adds an edited one.
-      sed -i -e 's/^\([^#].*\)fileencryption=[^,]*\(.*\)$/# &\n\1encryptable\2/g' $i
-      file_changed $i $md5
-    fi
-  done
-}
-
-disable_vaultkeeper() {
-  local md5
-  local i
-
-  ui_print " - Disabling vaultkeeperd..."
-
-  if [ $major -gt 9 ]; then
-    # This is Android 10/11: Vaultkeeper has its own init files.
-    #
-    for i in $ANDROID_ROOT/system/etc/init/vk*.rc /vendor/etc/init/vk*.rc /vendor/etc/init/vaultkeeper*; do
-      if [ -f $i ]; then
-	ui_print " -   Found $i."
-	md5=$( md5 $i )
-	sed -i -e 's/^[^#].*$/# &/' $i
-	file_changed $i $md5
-      fi
-    done
-  else
-    # This is Android 9: Vaultkeeper is started from init.rc.
-    #
-    sed -i -e 's/^[^#].*vaultkeeper.*$/# &/' \
-	-re '/\/system\/bin\/vaultkeeperd/,/^#?$/s/^[^#]*$/#&/' $ANDROID_ROOT/init.rc
+  if [ "$dm_block_ext4" ]; then
+    ui_print " - Unmounting /vendor_dlkm..."
+    umount /vendor_dlkm
+    ui_print " - Checking vendor_dlkm block partition before resizing..."
+    e2fsck -f $dm_block_ext4
+    ui_print " - Resizing the filesystem on $dm_block_ext4..."
+    resize2fs $dm_block_ext4
+    ui_print " - Make the partition R/W by unsharing its blocks..."
+    e2fsck -E unshare_blocks $dm_block_ext4
+  elif [ "$dm_block_f2fs" ]; then
+    vendor_dlkm_size_mb=$(du -sm /vendor_dlkm | cut -f1)
+    new_vendor_dlkm_size_mb=`echo $vendor_dlkm_size_mb \* 4.00 |bc`
+    new_vendor_dlkm_size_mb=${new_vendor_dlkm_size_mb%.*}
+    uuid=$(toybox blkid $dm_block_f2fs | egrep '[0-9a-f]{8}-([0-9a-f]{4}-){3}[0-9a-f]{12}' -o)
+    ui_print " - Create R/W vendor_dlkm image...${new_vendor_dlkm_size_mb}M"
+    truncate -s ${new_vendor_dlkm_size_mb}M $ADLKMTMP/vendor_dlkm-rw.img
+    make_f2fs -g android -O project_quota,extra_attr,inode_checksum,sb_checksum,compression,flexible_inline_xattr,verity,inode_crtime -U $uuid -f -l vendor_dlkm $ADLKMTMP/vendor_dlkm-rw.img
+    mkdir -p $ADLKMTMP/vendor_dlkm-rw
+    mount $ADLKMTMP/vendor_dlkm-rw.img $ADLKMTMP/vendor_dlkm-rw
+    ui_print " - Copy old R/O vendor_dlkm file to our new created..."
+    cp -a --preserve=all /vendor_dlkm/* $ADLKMTMP/vendor_dlkm-rw 
+    umount $ADLKMTMP/vendor_dlkm-rw
+    umount /vendor_dlkm
+    # ui_print " - Checking vendor_dlkm image before flashing..."
+    # fsck.f2fs -f $ADLKMTMP/vendor_dlkm-rw.img
+    # ui_print " - Dynamic partition resizing using lptools"
+    # lptools resize vendor_dlkm $(wc -c < $ADLKMTMP/vendor_dlkm-rw.img)
+    # lptools unmap vendor_dlkm
+    # lptools map vendor_dlkm
+    # ui_print " - Write our new R/W vendor_dlkm image, Please wait..."
+    # dd if=$ADLKMTMP/vendor_dlkm-rw.img of=/dev/block/bootdevice/by-name/vendor_dlkm
   fi
-
-  # Qualcomm devices such as the T860 and T865 need this, otherwise the log
-  # will be spammed with messages about failed connections to the Vaultkeeper
-  # service.
-  #
-  rm_from_manifest vaultkeeper
-
-  for i in $ANDROID_ROOT/system /vendor; do
-    if [ -f $i/bin/vaultkeeperd ]; then
-      ui_print " -   Found $i/bin/vaultkeeperd. Disabling..."
-      chmod 0 $i/bin/vaultkeeperd
-    fi
-  done
+  ui_print " - Remounting /vendor_dlkm..."
+  mount /vendor_dlkm
+  mount -o remount,rw /vendor_dlkm
 }
 
-disable_cass() {
-  local md5
-  local i
-
-  # The T860 needs this. Otherwise, the log will fill with messages like this:
-  #
-  # 10-20 03:23:20.501 27757 27757 E CASS: Failed to connect(4)
-  # 10-20 03:23:20.501 27757 27757 E CASS: Failed to connect ril daemon(2). Retry cnt(6)
-  # The F907B on Android 10 also needs it:
-  #
-  # 04-05 22:21:23.519  3599  3599 E CASS_DEBUG: VaultKeeper is not ready. try again.
-  # 04-05 22:21:23.519  3599  3599 I CASS_DEBUG: Disconnect ril daemon
-  # 04-05 22:21:23.519  3599  3599 I CASS_DEBUG: Failed to connect ril daemon(1). Retry cnt(2)
-  #
-  # As of OneUI 2.5, other devices need it, too; even Exynos.
-  #
-  ui_print " - Disabling cass..."
-
-  for i in $ANDROID_ROOT/init.rc /vendor/init/cass.rc /vendor/etc/init/cass.rc; do
-    if [ -f $i ]; then
-      ui_print " -   Found $i. Disabling..."
-      md5=$( md5 $i )
-      sed -i -e 's/^[^#].*cass.*$/# &/' -re '/\/(system|vendor)\/bin\/cass/,/^#?$/s/^[^#]*$/#&/' $i
-      file_changed $i $md5
-    fi
-  done
-}
-
-disable_proca() {
-  local md5
-  local i
-
-  ui_print " - Disabling process authentication..."
-
-  # G97[035]F = pa_daemon.rc on Android 9; pa_daemon_teegris.rc on Android 10.
-  # G977B, N97[05]F, A105F, A505F = pa_daemon_teegris.rc
-  # T510 + T515 = pa_daemon_kinibi.rc
-  # T860 + T865 = pa_daemon_qsee.rc
-  #
-  for i in /vendor/etc/init/pa_daemon*.rc; do
-    if [ -f $i ]; then
-      ui_print " -   Found $i. Disabling..."
-      sed -i -e 's/^[^#]/# &/' $i
-      file_changed $i $md5
-    fi
-  done
-
-  rm_from_manifest proca
-}
-
-disable_wsm() {
-  ui_print " - Disabling wsm..."
-  rm_from_manifest wsm
-}
-
-disable_recovery_restoration() {
-  local r=recovery-from-boot.p
-  local found
-  local i
-
-  ui_print " - Disabling restoration of stock recovery..."
-
-  for i in $ANDROID_ROOT $ANDROID_ROOT/system; do
-    if [ -f $i/$r~ ]; then
-	ui_print " -   ...already disabled."
-	found=true
-	break
-    fi
-
-    if [ -f $i/$r ]; then
-      ui_print " -   Found $i/$r. Disabling..."
-      mv $i/$r $i/$r~
-
-      if [ -f $i/$r~ ]; then
-	ui_print " -     ...succeeded."
-      else
-	ui_print " -     ...failed."
-      fi
-
-      found=true
-      break
-    fi
-
-  done
-
-  [ -z "$found" ] && ui_print " -   Found no stock recovery. Pfft."
-}
-
-patch_libbluetooth() {
-  [ $major -ne 10 ] && return
-
-  local f=$ANDROID_ROOT/system/lib64/libbluetooth.so
-  local tf=/tmp/f
-
-  ui_print " - Bluetooth fix requested via renamed zip."
-  ui_print " - Attempting to patch $f..."
-  ui_print "     This may take a while."
-
-  if echo $device | grep -E '[GN]9[67][03567][UW0]|F90(0[FN]|7[BN])|T86[05]' >/dev/null; then
-    # Snapdragon based devices, such as Tab S6, Fold (5G), USA and Chinese S9/10/N9/10.
-    substitute='s/88000054691180522925c81a69000037e0030032/04000014691180522925c81a69000037e0031f2a/'
+vendor_dlkm_free_size_check() {
+  if dd if=/dev/zero of=/vendor_dlkm/test bs=1 count=1 2>/dev/null; then
+    ui_print " -     ...succeeded."
+    rm -f /vendor_dlkm/test
   else
-    substitute='s/c8000034f4031f2af3031f2ae8030032/1f2003d5f4031f2af3031f2ae8031f2a/'
-  fi
-
-  xxd -p $f | tr -d '\n ' | sed -e $substitute | xxd -rp > $tf
-
-  if ! cmp $tf $f >/dev/null && [ $(stat -c '%s' $tf) -eq $(stat -c '%s' $f) ]; then
-    ui_print " -   Patching succeeded."
-    touch -r $f $tf
-    chmod 644 $tf
-    mv $tf $f
-  else
-    ui_print " -   Patching failed. No change made."
-    rm -f $tf
+    ui_print " - Checking vendor_dlkm free size..."
+    ui_print " -     ...No free space left on vendor_dlkm, attempting to vendor_dlkm vendor..."
+    ui_print " "
+    rm -f /vendor_dlkm/test
+    resize_vendor_dlkm
   fi
 }
+
+copy_dlkm() {
+    cp $ADLKMHOME/modules/*.ko /vendor_dlkm/lib/modules
+}
+
 
 ui_print " "
-print_full_bar
-print_justified "Multi-disabler v3.1 for Samsung devices"
-print_justified "running Android 9 or later."
-print_justified "by Ian Macdonald"
-print_full_bar
+ui_print "Replace DLKM for Samsung devices"
+ui_print "by fansin"
+ui_print " "
+ui_print "Originated from"
+ui_print "Multi-disabler for Samsung devices"
+ui_print "running Android 9 or later."
+ui_print "by Ian Macdonald, enhanced by afaneh92"
 ui_print " "
 
 os=$(getprop ro.build.version.release)
@@ -297,19 +151,26 @@ if [ "$mft" != samsung ]; then
 elif [ -z "$device" ]; then
   ui_print " - Could not determine device model."
   fatal=true
-elif [ $major -lt 9 ]; then
+# elif [ $major -lt 9 ]; then
+elif [ $major -lt 12 ]; then
   ui_print " - This software is incompatible with Android $major."
   fatal=true
 fi
 if [ -n "$fatal" ]; then
-  ui_print " - Installation aborted."
-  ui_print " "
-  exit 1
+  abort " - Installation aborted."
 fi
 
 ui_print " - Detected a $device device with a $fw bootloader."
 ui_print " - The environment appears to be Android $major."
 ui_print " "
+
+cleanup;
+mkdir -p $ADLKMHOME/tmp;
+cd $ADLKMHOME;
+unzip -o "$ZIPFILE";
+if [ $? != 0 -o ! "$(ls modules)" ]; then
+  abort "Unzip failed. Aborting...";
+fi;
 
 ui_print " - Mounting $ANDROID_ROOT..."
 mount $ANDROID_ROOT 2>/dev/null
@@ -320,40 +181,27 @@ if ! mount | grep $ANDROID_ROOT >/dev/null; then
   ui_print " -   Attempt failed. Mounting at $ANDROID_ROOT..."
   mount -o rw $ANDROID_ROOT
   if ! mount | grep $ANDROID_ROOT >/dev/null; then
-    ui_print " -   Even that attempt failed. Aborting..."
-    exit 2
+    abort " -   Even that attempt failed. Aborting..."
   fi
 fi
 
-ui_print " - Mounting /vendor..."
-mount /vendor
-mount -o remount,rw /vendor
+ui_print " - Mounting /vendor_dlkm..."
+mount /vendor_dlkm
+mount -o remount,rw /vendor_dlkm
 
-if ! mount | grep /vendor >/dev/null; then
-  ui_print " -   Mount failed. Aborting..."
-  exit 3
+if ! mount | grep /vendor_dlkm >/dev/null; then
+  abort " -   Mount failed. Aborting..."
 fi
 
-disable_fbe
-disable_recovery_restoration
+resize_vendor_dlkm
+# vendor_dlkm_free_size_check
+# copy_ko
 
-if [ "$dp" != true ]; then
-  disable_vaultkeeper
-  disable_proca
-  [ $ZIPNAME != ${ZIPNAME/_btfix//} ] && [ $major -gt 9 ] && patch_libbluetooth
-fi
-
-if [ $major -gt 9 ]; then
-  disable_wsm
-  if echo $device | grep -E 'G97([035][FNUW0]|7[BNUW])|N97([05][FNUW0]|6[BNQ0]|1N)|T860|F90(0[FN]|7[BN])|M[23]15F' >/dev/null; then
-    disable_cass
-  fi
-fi
-
-ui_print " - Unmounting /vendor..."
-umount /vendor
+ui_print " - Unmounting /vendor_dlkm..."
+umount /vendor_dlkm
 ui_print " - Unmounting $ANDROID_ROOT..."
 umount $ANDROID_ROOT
+
 
 ui_print " "
 ui_print " - Finished."
