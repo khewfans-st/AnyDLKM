@@ -15,13 +15,27 @@
 # ####################################################
 # afaneh92 @ xda-developers
 
-OUTFD=/proc/self/fd/$2;
+OUTFD=$2
 ZIPFILE="$3";
+
+# Detect real $OUTFD
+#
+if readlink /proc/$$/fd/$OUTFD 2>/dev/null | grep /tmp >/dev/null; then
+  OUTFD=0
+  for FD in $( ls /proc/$$/fd ); do
+    if readlink /proc/$$/fd/$FD 2>/dev/null | grep pipe >/dev/null; then
+      if ps | grep " 3 $FD " | grep -v grep >/dev/null; then
+	OUTFD=$FD
+	break
+      fi
+    fi
+  done
+fi
 
 # set up working directory variables
 [ "$ADLKMHOME" ] || ADLKMHOME=/tmp/anydlkm;
 [ "$ANDROID_ROOT" ] || ANDROID_ROOT=/system;
-$ADLKMTMP=$ADLKMHOME/tmp
+ADLKMTMP=$ADLKMHOME/tmp
 
 ### output/testing functions:
 # ui_print "<text>" [...]
@@ -36,7 +50,7 @@ ui_print() {
 # abort ["<text>" [...]]
 abort() {
   ui_print " " "$@";
-  cleanup
+  cleanup;
   exit 1;
 }
 
@@ -88,14 +102,14 @@ resize_vendor_dlkm() {
     cp -a --preserve=all /vendor_dlkm/* $ADLKMTMP/vendor_dlkm-rw 
     umount $ADLKMTMP/vendor_dlkm-rw
     umount /vendor_dlkm
-    # ui_print " - Checking vendor_dlkm image before flashing..."
-    # fsck.f2fs -f $ADLKMTMP/vendor_dlkm-rw.img
-    # ui_print " - Dynamic partition resizing using lptools"
-    # lptools resize vendor_dlkm $(wc -c < $ADLKMTMP/vendor_dlkm-rw.img)
-    # lptools unmap vendor_dlkm
-    # lptools map vendor_dlkm
-    # ui_print " - Write our new R/W vendor_dlkm image, Please wait..."
-    # dd if=$ADLKMTMP/vendor_dlkm-rw.img of=/dev/block/bootdevice/by-name/vendor_dlkm
+    ui_print " - Checking vendor_dlkm image before flashing..."
+    fsck.f2fs -f $ADLKMTMP/vendor_dlkm-rw.img
+    ui_print " - Dynamic partition resizing using lptools"
+    lptools resize vendor_dlkm $(wc -c < $ADLKMTMP/vendor_dlkm-rw.img)
+    lptools unmap vendor_dlkm
+    lptools map vendor_dlkm
+    ui_print " - Write our new R/W vendor_dlkm image, Please wait..."
+    dd if=$ADLKMTMP/vendor_dlkm-rw.img of=/dev/block/bootdevice/by-name/vendor_dlkm
   fi
   ui_print " - Remounting /vendor_dlkm..."
   mount /vendor_dlkm
@@ -116,6 +130,9 @@ vendor_dlkm_free_size_check() {
 }
 
 copy_dlkm() {
+    ui_print " "
+    ui_print " - Copying DLKM to /vendor_dlkm/lib/modules"
+    ui_print " "
     cp $ADLKMHOME/modules/*.ko /vendor_dlkm/lib/modules
 }
 
@@ -168,7 +185,7 @@ cleanup;
 mkdir -p $ADLKMHOME/tmp;
 cd $ADLKMHOME;
 unzip -o "$ZIPFILE";
-if [ $? != 0 -o ! "$(ls modules)" ]; then
+if [ $? != 0 -o ! "$(ls META-INF)" ]; then
   abort "Unzip failed. Aborting...";
 fi;
 
@@ -193,15 +210,25 @@ if ! mount | grep /vendor_dlkm >/dev/null; then
   abort " -   Mount failed. Aborting..."
 fi
 
-resize_vendor_dlkm
-# vendor_dlkm_free_size_check
-# copy_ko
+# resize_vendor_dlkm
+vendor_dlkm_free_size_check
+
+if [ $? != 0 -o ! "$(ls /vendor_dlkm)" ]; then
+  ui_print " - IMPORTANT!!!"
+  ui_print " -   resize vendor_dlkm failed..."
+  ui_print " -   reboot to DOWNLOAD mode and flash stock image."
+  ui_print " -   if not, your phone may become BRICK."
+  abort " - Aborting...";
+fi;
+
+copy_dlkm
 
 ui_print " - Unmounting /vendor_dlkm..."
 umount /vendor_dlkm
 ui_print " - Unmounting $ANDROID_ROOT..."
 umount $ANDROID_ROOT
 
+cleanup;
 
 ui_print " "
 ui_print " - Finished."
